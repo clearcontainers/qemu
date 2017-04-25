@@ -2376,11 +2376,19 @@ void memory_listener_unregister(MemoryListener *listener)
     listener->address_space = NULL;
 }
 
-void address_space_init(AddressSpace *as, MemoryRegion *root, const char *name)
+void address_space_init(AddressSpace *as, MemoryRegion *root,
+       const char *name)
+{
+    address_space_init_with_bits(as, root, name, ADDR_SPACE_BITS);
+}
+
+void address_space_init_with_bits(AddressSpace *as, MemoryRegion *root,
+       const char *name, int space_bits)
 {
     memory_region_ref(root);
     memory_region_transaction_begin();
     as->ref_count = 1;
+    as->space_bits = space_bits;
     as->root = root;
     as->malloced = false;
     as->current_map = g_new(FlatView, 1);
