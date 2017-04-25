@@ -109,6 +109,10 @@ static void q35_host_get_pci_hole64_start(Object *obj, Visitor *v,
 
     pci_bus_get_w64_range(h->bus, &w64);
     value = range_is_empty(&w64) ? 0 : range_lob(&w64);
+    /* reserve highest 4G for 64bit pci hole */
+    if (value < 0x100000000l) {
+        value = (1l << MEMORY_SPACE_BITS) - 0x100000000l;
+    }
     visit_type_uint64(v, name, &value, errp);
 }
 
@@ -122,6 +126,9 @@ static void q35_host_get_pci_hole64_end(Object *obj, Visitor *v,
 
     pci_bus_get_w64_range(h->bus, &w64);
     value = range_is_empty(&w64) ? 0 : range_upb(&w64) + 1;
+    if (value < 0x100000000l) {
+        value = 1l << MEMORY_SPACE_BITS;
+    }
     visit_type_uint64(v, name, &value, errp);
 }
 
