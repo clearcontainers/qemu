@@ -23,24 +23,25 @@
 #include "qemu/iov.h"
 #include "monitor/monitor.h"
 
+#define VHOST_SET_PATH 3
+
 enum {
     VHOST_9P_SAVEVM_VERSION = 0,
-
     VHOST_9P_MAX_REQ = 128,
 };
 
-const char *tag = "guoykshare";
 
 static void vhost_9p_get_config(VirtIODevice *vdev, uint8_t *out)
 {
     VHost9p *p9dev = VHOST_9P(vdev);
     struct virtio_9p_config *cfg;
+    VHost9pConf *c = &p9dev->conf;
 
-    size_t len = strlen(tag);
+    size_t len = strlen(c->tag);
     cfg = g_malloc0(sizeof(struct virtio_9p_config) + len);
     virtio_stw_p(vdev, &cfg->tag_len, len);
     /* We don't copy the terminating null to config space */
-    memcpy(cfg->tag, tag, len);
+    memcpy(cfg->tag, c->tag, len);
     memcpy(out, cfg, p9dev->config_size);
     g_free(cfg);
 }
@@ -195,6 +196,7 @@ static void vhost_9p_device_realize(DeviceState *dev, Error **errp)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(dev);
     VHost9p *p9dev = VHOST_9P(dev);
+    VHost9pConf *c = &p9dev->conf;
     int vhostfd;
     int ret;
 
@@ -213,7 +215,7 @@ static void vhost_9p_device_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    p9dev->config_size = sizeof(struct virtio_9p_config) + strlen(tag);
+    p9dev->config_size = sizeof(struct virtio_9p_config) + strlen(c->tag);
     virtio_init(vdev, "vhost-9p", VIRTIO_ID_9P, p9dev->config_size);
 
     virtio_add_queue(vdev, VHOST_9P_MAX_REQ, vhost_9p_handle_output);
@@ -226,6 +228,7 @@ static void vhost_9p_device_realize(DeviceState *dev, Error **errp)
         error_setg_errno(errp, -ret, "vhost-9p: vhost_dev_init failed");
         goto err_virtio;
     }
+    ioctl(vhostfd, VHOST_SET_PATH, c->path);
 
     return;
 
@@ -249,6 +252,8 @@ static void vhost_9p_device_unrealize(DeviceState *dev, Error **errp)
 
 static Property vhost_9p_properties[] = {
     DEFINE_PROP_STRING("vhostfd", VHost9p, conf.vhostfd),
+    DEFINE_PROP_STRING("mount_tag", VHost9p, conf.tag),
+    DEFINE_PROP_STRING("path", VHost9p, conf.path),
     DEFINE_PROP_END_OF_LIST(),
 };
 

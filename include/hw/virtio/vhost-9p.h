@@ -23,6 +23,8 @@
 
 typedef struct {
     char *vhostfd;
+    char *tag;
+    char *path;
 } VHost9pConf;
 
 typedef struct {
