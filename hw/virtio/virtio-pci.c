@@ -2135,6 +2135,54 @@ static const TypeInfo vhost_scsi_pci_info = {
 };
 #endif
 
+/* vhost-9p-pci */
+
+#ifdef CONFIG_VHOST_9P
+static Property vhost_9p_pci_properties[] = {
+    DEFINE_PROP_UINT32("vectors", VirtIOPCIProxy, nvectors, 3),
+    DEFINE_PROP_END_OF_LIST(),
+};
+
+static void vhost_9p_pci_realize(VirtIOPCIProxy *vpci_dev, Error **errp)
+{
+    VHost9pPCI *dev = VHOST_9P_PCI(vpci_dev);
+    DeviceState *vdev = DEVICE(&dev->vdev);
+
+    qdev_set_parent_bus(vdev, BUS(&vpci_dev->bus));
+    object_property_set_bool(OBJECT(vdev), true, "realized", errp);
+}
+
+static void vhost_9p_pci_class_init(ObjectClass *klass, void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    VirtioPCIClass *k = VIRTIO_PCI_CLASS(klass);
+    PCIDeviceClass *pcidev_k = PCI_DEVICE_CLASS(klass);
+    k->realize = vhost_9p_pci_realize;
+    set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
+    dc->props = vhost_9p_pci_properties;
+    pcidev_k->vendor_id = PCI_VENDOR_ID_REDHAT_QUMRANET;
+    pcidev_k->device_id = PCI_DEVICE_ID_VIRTIO_9P;
+    pcidev_k->revision = 0x00;
+    pcidev_k->class_id = PCI_CLASS_COMMUNICATION_OTHER;
+}
+
+static void vhost_9p_pci_instance_init(Object *obj)
+{
+    VHost9pPCI *dev = VHOST_9P_PCI(obj);
+
+    virtio_instance_init_common(obj, &dev->vdev, sizeof(dev->vdev),
+                                TYPE_VHOST_9P);
+}
+
+static const TypeInfo vhost_9p_pci_info = {
+    .name          = TYPE_VHOST_9P_PCI,
+    .parent        = TYPE_VIRTIO_PCI,
+    .instance_size = sizeof(VHost9pPCI),
+    .instance_init = vhost_9p_pci_instance_init,
+    .class_init    = vhost_9p_pci_class_init,
+};
+#endif
+
 /* vhost-vsock-pci */
 
 #ifdef CONFIG_VHOST_VSOCK
@@ -2614,6 +2662,9 @@ static void virtio_pci_register_types(void)
 #endif
 #ifdef CONFIG_VHOST_VSOCK
     type_register_static(&vhost_vsock_pci_info);
+#endif
+#ifdef CONFIG_VHOST_9P
+    type_register_static(&vhost_9p_pci_info);
 #endif
 }
 
