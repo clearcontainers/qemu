@@ -100,6 +100,7 @@
 #define BOOT_GDT_FLAGS_TSS      DESC_P_MASK | (11 << DESC_TYPE_SHIFT)
 #define BOOT_PML4               0x9000
 #define BOOT_PDPTE              0xA000
+#define BOOT_PDE                0xB000
 #define BOOT_LOADER_SP          0x8000
 #define BOOT_CMDLINE_OFFSET     0x20000
 #define BOOT_ZEROPAGE_OFFSET    0x7000
@@ -761,18 +762,28 @@ static void setup_seg_desc_tables(void)
 
 static void setup_page_tables(void)
 {
-    void *p;
+    uint64_t *p, *p2;
     size_t len = 4096;
+    int i;
 
     p = cpu_physical_memory_map(BOOT_PML4, &len, 1);
     memset(p, 0, 4096);
-    *(uint64_t*)p = (uint64_t)(BOOT_PDPTE | 3);
+    *p = (uint64_t)(BOOT_PDPTE | 3);
     cpu_physical_memory_unmap(p, len, 1, len);
 
     len = 4096;
     p = cpu_physical_memory_map(BOOT_PDPTE, &len, 1);
     memset(p, 0, 4096);
-    *(uint64_t*)p = 0x83;
+    *p = (uint64_t)(BOOT_PDE | 3);
+    cpu_physical_memory_unmap(p, len, 1, len);
+
+    len = 4096;
+    p = cpu_physical_memory_map(BOOT_PDE, &len, 1);
+    p2 = p;
+    for (i = 0; i < 512; i++) {
+        *p2 = (uint64_t)((i << 21) | 0x83);
+        p2++;
+    }
     cpu_physical_memory_unmap(p, len, 1, len);
 }
 
