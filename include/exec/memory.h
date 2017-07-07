@@ -258,7 +258,7 @@ struct MemoryListener {
 };
 
 #define ADDR_SPACE_BITS 64
-#define MEMORY_SPACE_BITS 39
+#define MEMORY_SPACE_BITS 36
 #define IO_SPACE_BITS 16
 
 /**
