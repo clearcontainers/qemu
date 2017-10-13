@@ -140,6 +140,10 @@ static int pci_slot_get_pirq(PCIDevice *pci_dev, int pci_intx)
 
 static void i440fx_update_memory_mappings(PCII440FXState *d)
 {
+    PCMachineState *pcms = PC_MACHINE(qdev_get_machine());
+    if (!pcms->fw) {
+        return;
+    }
     int i;
     PCIDevice *pd = PCI_DEVICE(d);
 
@@ -317,6 +321,34 @@ static void i440fx_realize(PCIDevice *dev, Error **errp)
     }
 }
 
+/* SMRAM */
+/* if there is no firmware, no one is going to setup SMM,
+   so disable it.
+ */
+static void init_smram(PCII440FXState *f, PCIDevice *d)
+{
+    PCMachineState *pcms = PC_MACHINE(qdev_get_machine());
+    if (!pcms->fw) {
+        return;
+    }
+    /* if *disabled* show SMRAM to all CPUs */
+    memory_region_init_alias(&f->smram_region, OBJECT(d), "smram-region",
+                             f->pci_address_space, 0xa0000, 0x20000);
+    memory_region_add_subregion_overlap(f->system_memory, 0xa0000,
+                                        &f->smram_region, 1);
+    memory_region_set_enabled(&f->smram_region, true);
+
+    /* smram, as seen by SMM CPUs */
+    memory_region_init(&f->smram, OBJECT(d), "smram", 1ull << 32);
+    memory_region_set_enabled(&f->smram, true);
+    memory_region_init_alias(&f->low_smram, OBJECT(d), "smram-low",
+                             f->ram_memory, 0xa0000, 0x20000);
+    memory_region_set_enabled(&f->low_smram, true);
+    memory_region_add_subregion(&f->smram, 0xa0000, &f->low_smram);
+    object_property_add_const_link(qdev_get_machine(), "smram",
+                                   OBJECT(&f->smram), &error_abort);
+}
+
 PCIBus *i440fx_init(const char *host_type, const char *pci_type,
                     PCII440FXState **pi440fx_state,
                     int *piix3_devfn,
@@ -361,22 +393,7 @@ PCIBus *i440fx_init(const char *host_type, const char *pci_type,
     pc_pci_as_mapping_init(OBJECT(f), f->system_memory,
                            f->pci_address_space);
 
-    /* if *disabled* show SMRAM to all CPUs */
-    memory_region_init_alias(&f->smram_region, OBJECT(d), "smram-region",
-                             f->pci_address_space, 0xa0000, 0x20000);
-    memory_region_add_subregion_overlap(f->system_memory, 0xa0000,
-                                        &f->smram_region, 1);
-    memory_region_set_enabled(&f->smram_region, true);
-
-    /* smram, as seen by SMM CPUs */
-    memory_region_init(&f->smram, OBJECT(d), "smram", 1ull << 32);
-    memory_region_set_enabled(&f->smram, true);
-    memory_region_init_alias(&f->low_smram, OBJECT(d), "smram-low",
-                             f->ram_memory, 0xa0000, 0x20000);
-    memory_region_set_enabled(&f->low_smram, true);
-    memory_region_add_subregion(&f->smram, 0xa0000, &f->low_smram);
-    object_property_add_const_link(qdev_get_machine(), "smram",
-                                   OBJECT(&f->smram), &error_abort);
+    init_smram(f,d);
 
     init_pam(dev, f->ram_memory, f->system_memory, f->pci_address_space,
              &f->pam_regions[0], PAM_BIOS_BASE, PAM_BIOS_SIZE);
