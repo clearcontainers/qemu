@@ -538,6 +538,9 @@ static void ich9_lpc_reset(DeviceState *qdev)
 {
     PCIDevice *d = PCI_DEVICE(qdev);
     ICH9LPCState *lpc = ICH9_LPC_DEVICE(d);
+    PCMachineState *pcms = PC_MACHINE(qdev_get_machine());
+    uint32_t pm_base = ICH9_LPC_PMBASE_DEFAULT;
+    uint8_t lpc_ctlr = ICH9_LPC_ACPI_CTRL_DEFAULT;
     uint32_t rcba_old = pci_get_long(d->config + ICH9_LPC_RCBA);
     int i;
 
@@ -549,9 +552,14 @@ static void ich9_lpc_reset(DeviceState *qdev)
         pci_set_byte(d->config + ICH9_LPC_PIRQE_ROUT + i,
                      ICH9_LPC_PIRQ_ROUT_DEFAULT);
     }
-    pci_set_byte(d->config + ICH9_LPC_ACPI_CTRL, ICH9_LPC_ACPI_CTRL_DEFAULT);
 
-    pci_set_long(d->config + ICH9_LPC_PMBASE, ICH9_LPC_PMBASE_DEFAULT);
+    if (!pcms->fw_cfg) {
+        lpc_ctlr = ICH9_LPC_ACPI_CTRL_ACPI_EN;
+        pm_base = 0x600 | ICH9_LPC_PMBASE_RTE;
+    }
+
+    pci_set_byte(d->config + ICH9_LPC_ACPI_CTRL, lpc_ctlr);
+    pci_set_long(d->config + ICH9_LPC_PMBASE, pm_base);
     pci_set_long(d->config + ICH9_LPC_RCBA, ICH9_LPC_RCBA_DEFAULT);
 
     ich9_cc_reset(lpc);

@@ -36,6 +36,9 @@
 #ifdef CONFIG_VHOST_VSOCK
 #include "hw/virtio/vhost-vsock.h"
 #endif
+#ifdef CONFIG_VHOST_9P
+#include "hw/virtio/vhost-9p.h"
+#endif
 
 typedef struct VirtIOPCIProxy VirtIOPCIProxy;
 typedef struct VirtIOBlkPCI VirtIOBlkPCI;
@@ -51,6 +54,7 @@ typedef struct VirtIOInputHostPCI VirtIOInputHostPCI;
 typedef struct VirtIOGPUPCI VirtIOGPUPCI;
 typedef struct VHostVSockPCI VHostVSockPCI;
 typedef struct VirtIOCryptoPCI VirtIOCryptoPCI;
+typedef struct VHost9pPCI VHost9pPCI;
 
 /* virtio-pci-bus */
 
@@ -367,6 +371,20 @@ struct VirtIOGPUPCI {
 struct VHostVSockPCI {
     VirtIOPCIProxy parent_obj;
     VHostVSock vdev;
+};
+#endif
+
+#ifdef CONFIG_VHOST_9P
+/*
+ * vhost-9p-pci: This extends VirtioPCIProxy.
+ */
+#define TYPE_VHOST_9P_PCI "vhost-9p-pci"
+#define VHOST_9P_PCI(obj) \
+        OBJECT_CHECK(VHost9pPCI, (obj), TYPE_VHOST_9P_PCI)
+
+struct VHost9pPCI {
+    VirtIOPCIProxy parent_obj;
+    VHost9p vdev;
 };
 #endif
 

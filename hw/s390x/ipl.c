@@ -327,7 +327,7 @@ static int load_netboot_image(Error **errp)
     }
 
     img_size = load_elf_ram(netboot_filename, NULL, NULL, &ipl->start_addr,
-                            NULL, NULL, 1, EM_S390, 0, 0, NULL, false);
+                            NULL, NULL, 1, EM_S390, 0, 0, NULL, false, false);
 
     if (img_size < 0) {
         img_size = load_image_size(netboot_filename, ram_ptr, ram_size);

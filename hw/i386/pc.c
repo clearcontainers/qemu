@@ -86,6 +86,32 @@
 #define FW_CFG_E820_TABLE (FW_CFG_ARCH_LOCAL + 3)
 #define FW_CFG_HPET (FW_CFG_ARCH_LOCAL + 4)
 
+#define BOOT_GDT                0x500
+#define BOOT_IDT                0x520
+#define BOOT_GDT_NULL           0
+#define BOOT_GDT_CODE           1
+#define BOOT_GDT_DATA           2
+#define BOOT_GDT_TSS            3
+#define BOOT_GDT_MAX            4
+#define BOOT_GDT_FLAGS_CODE     (DESC_P_MASK | DESC_S_MASK | DESC_CS_MASK | \
+                                 DESC_R_MASK | DESC_A_MASK | DESC_G_MASK )
+#define BOOT_GDT_FLAGS_DATA     (DESC_P_MASK | DESC_S_MASK | DESC_W_MASK |  \
+                                 DESC_A_MASK | DESC_B_MASK | DESC_G_MASK)
+#define BOOT_GDT_FLAGS_TSS      DESC_P_MASK | (11 << DESC_TYPE_SHIFT)
+#define BOOT_PML4               0x9000
+#define BOOT_PDPTE              0xA000
+#define BOOT_PDE                0xB000
+#define BOOT_LOADER_SP          0x8000
+#define BOOT_CMDLINE_OFFSET     0x20000
+#define BOOT_ZEROPAGE_OFFSET    0x7000
+
+#define GDT_ENTRY(flags, base, limit)               \
+       ((((base)  & 0xff000000ULL) << (56-24)) |    \
+       (((flags) & 0x0000f0ffULL) << 40) |          \
+       (((limit) & 0x000f0000ULL) << (48-16)) |     \
+       (((base)  & 0x00ffffffULL) << 16) |          \
+       (((limit) & 0x0000ffffULL)))
+
 #define E820_NR_ENTRIES		16
 
 struct e820_entry {
@@ -99,6 +125,13 @@ struct e820_table {
     struct e820_entry entry[E820_NR_ENTRIES];
 } QEMU_PACKED __attribute((__aligned__(4)));
 
+struct kernel_boot_info {
+    uint64_t entry;
+    bool protected_mode;
+    bool long_mode;
+};
+
+static struct kernel_boot_info boot_info;
 static struct e820_table e820_reserve;
 static struct e820_entry *e820_table;
 static unsigned e820_entries;
@@ -668,6 +701,134 @@ bool e820_get_entry(int idx, uint32_t type, uint64_t *address, uint64_t *length)
     return false;
 }
 
+static void reset_cpu(CPUX86State *env)
+{
+    unsigned int flags = BOOT_GDT_FLAGS_CODE;
+
+    if (boot_info.long_mode) {
+        flags |= DESC_L_MASK;
+    }
+    cpu_x86_load_seg_cache(env, R_CS, BOOT_GDT_CODE * 8, 0, 0xfffff, flags);
+
+    cpu_x86_load_seg_cache(env, R_DS, BOOT_GDT_DATA * 8, 0, 0xfffff,
+                           BOOT_GDT_FLAGS_DATA);
+    cpu_x86_load_seg_cache(env, R_ES, BOOT_GDT_DATA * 8, 0, 0xfffff,
+                           BOOT_GDT_FLAGS_DATA);
+    cpu_x86_load_seg_cache(env, R_FS, BOOT_GDT_DATA * 8, 0, 0xfffff,
+                           BOOT_GDT_FLAGS_DATA);
+    cpu_x86_load_seg_cache(env, R_GS, BOOT_GDT_DATA * 8, 0, 0xfffff,
+                           BOOT_GDT_FLAGS_DATA);
+    cpu_x86_load_seg_cache(env, R_SS, BOOT_GDT_DATA * 8, 0, 0xfffff,
+                           BOOT_GDT_FLAGS_DATA);
+
+    env->gdt.base = BOOT_GDT;
+    env->gdt.limit = BOOT_GDT_MAX * 8 - 1;
+
+    env->idt.base = BOOT_IDT;
+
+    env->tr.selector = BOOT_GDT_TSS * 8;
+    env->tr.flags = BOOT_GDT_FLAGS_TSS;
+
+    env->cr[3] = BOOT_PML4;
+    env->cr[0] |= (CR0_PG_MASK | CR0_PE_MASK);
+
+    if (boot_info.long_mode) {
+        env->cr[4] |= CR4_PAE_MASK;
+        cpu_load_efer(env, env->efer | MSR_EFER_LME | MSR_EFER_LMA);
+    }
+
+    env->regs[R_ESP] = BOOT_LOADER_SP;
+    env->regs[R_ESI] = BOOT_ZEROPAGE_OFFSET;
+    env->eip = boot_info.entry;
+}
+
+static void setup_seg_desc_tables(void)
+{
+    uint64_t idt = 0;
+    uint64_t gdt[BOOT_GDT_MAX] = {
+             [BOOT_GDT_NULL] = GDT_ENTRY(0, 0, 0),
+             [BOOT_GDT_CODE] = GDT_ENTRY(BOOT_GDT_FLAGS_CODE, 0, 0xFFFFF),
+             [BOOT_GDT_DATA] = GDT_ENTRY(BOOT_GDT_FLAGS_DATA, 0, 0xFFFFF),
+             [BOOT_GDT_TSS ] = GDT_ENTRY(BOOT_GDT_FLAGS_TSS, 0, 0xFFFFF)
+            };
+
+    if (boot_info.long_mode) {
+        gdt[BOOT_GDT_CODE] |= (1UL << (32 + DESC_L_SHIFT));
+    }
+
+    cpu_physical_memory_write((hwaddr)BOOT_GDT, gdt, sizeof(gdt));
+    cpu_physical_memory_write((hwaddr)BOOT_IDT, &idt, sizeof(idt));
+}
+
+static void setup_page_tables(void)
+{
+    uint64_t *p, *p2;
+    size_t len = 4096;
+    int i;
+
+    p = cpu_physical_memory_map(BOOT_PML4, &len, 1);
+    memset(p, 0, 4096);
+    *p = (uint64_t)(BOOT_PDPTE | 3);
+    cpu_physical_memory_unmap(p, len, 1, len);
+
+    len = 4096;
+    p = cpu_physical_memory_map(BOOT_PDPTE, &len, 1);
+    memset(p, 0, 4096);
+    *p = (uint64_t)(BOOT_PDE | 3);
+    cpu_physical_memory_unmap(p, len, 1, len);
+
+    len = 4096;
+    p = cpu_physical_memory_map(BOOT_PDE, &len, 1);
+    p2 = p;
+    for (i = 0; i < 512; i++) {
+        *p2 = (uint64_t)((i << 21) | 0x83);
+        p2++;
+    }
+    cpu_physical_memory_unmap(p, len, 1, len);
+}
+
+static void setup_kernel_zero_page(void)
+{
+    int i;
+    uint8_t *zero_page;
+    void *e820_map;
+    size_t zero_page_size = 4096;
+    MachineState *machine = MACHINE(qdev_get_machine());
+    size_t cmdline_size = strlen(machine->kernel_cmdline) + 1;
+
+    cpu_physical_memory_write((hwaddr)BOOT_CMDLINE_OFFSET,
+                               machine->kernel_cmdline, cmdline_size);
+
+    zero_page = cpu_physical_memory_map((hwaddr)BOOT_ZEROPAGE_OFFSET,
+                                        &zero_page_size, 1);
+    memset(zero_page, 0, zero_page_size);
+
+    /* hdr.type_of_loader */
+    zero_page[0x210] = 0xFF;
+    /* hdr.boot_flag */
+    stw_p(zero_page + 0x1fe, 0xAA55);
+    /* hdr.header */
+    stl_p(zero_page + 0x202, 0x53726448);
+    /* hdr.cmd_line_ptr */
+    stl_p(zero_page + 0x228, BOOT_CMDLINE_OFFSET);
+    /* hdr.cmdline_size */
+    stl_p(zero_page + 0x238, cmdline_size);
+    /* e820_entries */
+    zero_page[0x1e8] = e820_entries;
+    /* e820_map */
+    e820_map = zero_page + 0x2d0;
+    for (i = 0; i < e820_entries; i++) {
+        stq_p(e820_map, e820_table[i].address);
+        e820_map += 8;
+        stq_p(e820_map, e820_table[i].length);
+        e820_map += 8;
+        stl_p(e820_map, e820_table[i].type);
+        e820_map += 4;
+    }
+
+    cpu_physical_memory_unmap(zero_page, zero_page_size, 1, zero_page_size);
+}
+
 /* Enables contiguous-apic-ID mode, for compatibility */
 static bool compat_apic_id_mode;
 
@@ -829,8 +990,43 @@ struct setup_data {
     uint8_t data[0];
 } __attribute__((packed));
 
-static void load_linux(PCMachineState *pcms,
-                       FWCfgState *fw_cfg)
+static void load_linux_efi(PCMachineState *pcms)
+{
+    unsigned char class;
+    MachineState *machine = MACHINE(pcms);
+    FILE *file = fopen(machine->kernel_filename, "rb");
+
+    if (!file) {
+        goto err;
+    }
+
+    if (fseek(file, EI_CLASS, 0) || fread(&class, 1, 1, file) != 1) {
+        fclose(file);
+        goto err;
+    }
+    fclose(file);
+
+    if (load_elf_shared(machine->kernel_filename, NULL, NULL, &boot_info.entry,
+                        NULL, NULL, 0, EM_X86_64, 0, 0, 1) < 0) {
+        goto err;
+    }
+
+    if (class == ELFCLASS64) {
+        boot_info.long_mode = true;
+    } else if (class != ELFCLASS32) {
+        goto err;
+    }
+
+    boot_info.protected_mode = true;
+    return;
+
+err:
+    fprintf(stderr, "qemu: could not load kernel '%s'\n",
+                    machine->kernel_filename);
+    exit(1);
+}
+
+static void load_linux_bzimage(PCMachineState *pcms, FWCfgState *fw_cfg)
 {
     uint16_t protocol;
     int setup_size, kernel_size, initrd_size = 0, cmdline_size;
@@ -1340,7 +1536,7 @@ void xen_load_linux(PCMachineState *pcms)
     fw_cfg_add_i16(fw_cfg, FW_CFG_NB_CPUS, pcms->boot_cpus);
     rom_set_fw(fw_cfg);
 
-    load_linux(pcms, fw_cfg);
+    load_linux_bzimage(pcms, fw_cfg);
     for (i = 0; i < nb_option_roms; i++) {
         assert(!strcmp(option_rom[i].name, "linuxboot.bin") ||
                !strcmp(option_rom[i].name, "linuxboot_dma.bin") ||
@@ -1358,7 +1554,7 @@ void pc_memory_init(PCMachineState *pcms,
     int linux_boot, i;
     MemoryRegion *ram, *option_rom_mr;
     MemoryRegion *ram_below_4g, *ram_above_4g;
-    FWCfgState *fw_cfg;
+    FWCfgState *fw_cfg = NULL;
     MachineState *machine = MACHINE(pcms);
     PCMachineClass *pcmc = PC_MACHINE_GET_CLASS(pcms);
 
@@ -1440,36 +1636,42 @@ void pc_memory_init(PCMachineState *pcms,
                                     &pcms->hotplug_memory.mr);
     }
 
-    /* Initialize PC system firmware */
-    pc_system_firmware_init(rom_memory, !pcmc->pci_enabled);
+    if (pcms->fw) {
+        /* Initialize PC system firmware */
+        pc_system_firmware_init(rom_memory, !pcmc->pci_enabled);
 
-    option_rom_mr = g_malloc(sizeof(*option_rom_mr));
-    memory_region_init_ram(option_rom_mr, NULL, "pc.rom", PC_ROM_SIZE,
-                           &error_fatal);
-    vmstate_register_ram_global(option_rom_mr);
-    memory_region_add_subregion_overlap(rom_memory,
-                                        PC_ROM_MIN_VGA,
-                                        option_rom_mr,
-                                        1);
+        option_rom_mr = g_malloc(sizeof(*option_rom_mr));
+        memory_region_init_ram(option_rom_mr, NULL, "pc.rom", PC_ROM_SIZE,
+                               &error_fatal);
+        vmstate_register_ram_global(option_rom_mr);
+        memory_region_add_subregion_overlap(rom_memory,
+                                            PC_ROM_MIN_VGA,
+                                            option_rom_mr,
+                                            1);
 
-    fw_cfg = bochs_bios_init(&address_space_memory, pcms);
+        fw_cfg = bochs_bios_init(&address_space_memory, pcms);
 
-    rom_set_fw(fw_cfg);
+        rom_set_fw(fw_cfg);
 
-    if (pcmc->has_reserved_memory && pcms->hotplug_memory.base) {
-        uint64_t *val = g_malloc(sizeof(*val));
-        PCMachineClass *pcmc = PC_MACHINE_GET_CLASS(pcms);
-        uint64_t res_mem_end = pcms->hotplug_memory.base;
+        if (pcmc->has_reserved_memory && pcms->hotplug_memory.base) {
+            uint64_t *val = g_malloc(sizeof(*val));
+            PCMachineClass *pcmc = PC_MACHINE_GET_CLASS(pcms);
+            uint64_t res_mem_end = pcms->hotplug_memory.base;
 
-        if (!pcmc->broken_reserved_end) {
-            res_mem_end += memory_region_size(&pcms->hotplug_memory.mr);
+            if (!pcmc->broken_reserved_end) {
+                res_mem_end += memory_region_size(&pcms->hotplug_memory.mr);
+            }
+            *val = cpu_to_le64(ROUND_UP(res_mem_end, 0x1ULL << 30));
+            fw_cfg_add_file(fw_cfg, "etc/reserved-memory-end", val, sizeof(*val));
         }
-        *val = cpu_to_le64(ROUND_UP(res_mem_end, 0x1ULL << 30));
-        fw_cfg_add_file(fw_cfg, "etc/reserved-memory-end", val, sizeof(*val));
     }
 
     if (linux_boot) {
-        load_linux(pcms, fw_cfg);
+        if (pcms->fw) {
+            load_linux_bzimage(pcms, fw_cfg);
+        } else {
+            load_linux_efi(pcms);
+        }
     }
 
     for (i = 0; i < nb_option_roms; i++) {
@@ -1884,7 +2086,9 @@ static void pc_cpu_unplug_cb(HotplugHandler *hotplug_dev,
     pcms->boot_cpus--;
     /* Update the number of CPUs in CMOS */
     rtc_set_cpus_count(pcms->rtc, pcms->boot_cpus);
-    fw_cfg_modify_i16(pcms->fw_cfg, FW_CFG_NB_CPUS, pcms->boot_cpus);
+    if (pcms->fw_cfg) {
+        fw_cfg_modify_i16(pcms->fw_cfg, FW_CFG_NB_CPUS, pcms->boot_cpus);
+    }
  out:
     error_propagate(errp, local_err);
 }
@@ -2208,6 +2412,34 @@ static void pc_machine_set_pit(Object *obj, bool value, Error **errp)
     pcms->pit = value;
 }
 
+static bool pc_machine_get_static_prt(Object *obj, Error **errp)
+{
+    PCMachineState *pcms = PC_MACHINE(obj);
+
+    return pcms->static_prt;
+}
+
+static void pc_machine_set_static_prt(Object *obj, bool value, Error **errp)
+{
+    PCMachineState *pcms = PC_MACHINE(obj);
+
+    pcms->static_prt = value;
+}
+
+static bool pc_machine_get_fw(Object *obj, Error **errp)
+{
+    PCMachineState *pcms = PC_MACHINE(obj);
+
+    return pcms->fw;
+}
+
+static void pc_machine_set_fw(Object *obj, bool value, Error **errp)
+{
+    PCMachineState *pcms = PC_MACHINE(obj);
+
+    pcms->fw = value;
+}
+
 static void pc_machine_initfn(Object *obj)
 {
     PCMachineState *pcms = PC_MACHINE(obj);
@@ -2222,6 +2454,8 @@ static void pc_machine_initfn(Object *obj)
     pcms->smbus = true;
     pcms->sata = true;
     pcms->pit = true;
+    pcms->static_prt = true;
+    pcms->fw = true;
 }
 
 static void pc_machine_reset(void)
@@ -2231,15 +2465,25 @@ static void pc_machine_reset(void)
 
     qemu_devices_reset();
 
-    /* Reset APIC after devices have been reset to cancel
-     * any changes that qemu_devices_reset() might have done.
-     */
     CPU_FOREACH(cs) {
         cpu = X86_CPU(cs);
 
+        /* Reset APIC after devices have been reset to cancel
+         * any changes that qemu_devices_reset() might have done.
+         */
         if (cpu->apic_state) {
             device_reset(cpu->apic_state);
         }
+
+        if (boot_info.protected_mode && cpu_is_bsp(cpu)) {
+            reset_cpu(&cpu->env);
+        }
+    }
+
+    if (boot_info.protected_mode) {
+        setup_seg_desc_tables();
+        setup_page_tables();
+        setup_kernel_zero_page();
     }
 }
 
@@ -2370,6 +2614,12 @@ static void pc_machine_class_init(ObjectClass *oc, void *data)
 
     object_class_property_add_bool(oc, PC_MACHINE_PIT,
         pc_machine_get_pit, pc_machine_set_pit, &error_abort);
+
+    object_class_property_add_bool(oc, PC_MACHINE_STATIC_PRT,
+        pc_machine_get_static_prt, pc_machine_set_static_prt, &error_abort);
+
+    object_class_property_add_bool(oc, PC_MACHINE_FW,
+        pc_machine_get_fw, pc_machine_set_fw, &error_abort);
 }
 
 static const TypeInfo pc_machine_info = {

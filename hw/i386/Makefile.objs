@@ -7,5 +7,5 @@ obj-y += amd_iommu.o
 obj-$(CONFIG_XEN) += ../xenpv/ xen/
 
 obj-y += kvmvapic.o
-obj-y += acpi-build.o
+obj-y += acpi-build.o acpi-build-nofw.o
 obj-y += pci-assign-load-rom.o

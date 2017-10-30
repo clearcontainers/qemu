@@ -150,20 +150,17 @@ typedef struct PhysPageEntry PhysPageEntry;
 
 struct PhysPageEntry {
     /* How many bits skip to next level (in units of L2_SIZE). 0 for a leaf. */
-    uint32_t skip : 6;
+    uint16_t skip:6;
      /* index into phys_sections (!skip) or phys_map_nodes (skip) */
-    uint32_t ptr : 26;
+    uint16_t ptr:10;
 };
 
-#define PHYS_MAP_NODE_NIL (((uint32_t)~0) >> 6)
+#define PHYS_MAP_NODE_NIL (((uint16_t)~0) >> 6)
 
 /* Size of the L2 (and L3, etc) page tables.  */
-#define ADDR_SPACE_BITS 64
 
 #define P_L2_BITS 9
 #define P_L2_SIZE (1 << P_L2_BITS)
-
-#define P_L2_LEVELS (((ADDR_SPACE_BITS - TARGET_PAGE_BITS - 1) / P_L2_BITS) + 1)
 
 typedef PhysPageEntry Node[P_L2_SIZE];
 
@@ -174,6 +171,7 @@ typedef struct PhysPageMap {
     unsigned sections_nb_alloc;
     unsigned nodes_nb;
     unsigned nodes_nb_alloc;
+    int levels;
     Node *nodes;
     MemoryRegionSection *sections;
 } PhysPageMap;
@@ -233,14 +231,24 @@ struct DirtyBitmapSnapshot {
 
 #if !defined(CONFIG_USER_ONLY)
 
-static void phys_map_node_reserve(PhysPageMap *map, unsigned nodes)
+static void phys_map_node_reserve(PhysPageMap *map)
 {
-    static unsigned alloc_hint = 16;
+    unsigned nodes;
+
+    if (map->levels == 1) {
+        /* only allocate one node for one level address space */
+        if (map->nodes_nb >= 1) {
+            return;
+        } else {
+            nodes = 1;
+        }
+    } else {
+        /* Wildly overreserve - it doesn't matter much. */
+        nodes = 2 * map->levels;
+    }
     if (map->nodes_nb + nodes > map->nodes_nb_alloc) {
-        map->nodes_nb_alloc = MAX(map->nodes_nb_alloc, alloc_hint);
         map->nodes_nb_alloc = MAX(map->nodes_nb_alloc, map->nodes_nb + nodes);
         map->nodes = g_renew(Node, map->nodes, map->nodes_nb_alloc);
-        alloc_hint = map->nodes_nb_alloc;
     }
 }
 
@@ -294,10 +302,10 @@ static void phys_page_set(AddressSpaceDispatch *d,
                           hwaddr index, hwaddr nb,
                           uint16_t leaf)
 {
-    /* Wildly overreserve - it doesn't matter much. */
-    phys_map_node_reserve(&d->map, 3 * P_L2_LEVELS);
+    int level = d->map.levels;
+    phys_map_node_reserve(&d->map);
 
-    phys_page_set_level(&d->map, &d->phys_map, &index, &nb, leaf, P_L2_LEVELS - 1);
+    phys_page_set_level(&d->map, &d->phys_map, &index, &nb, leaf, level - 1);
 }
 
 /* Compact a non leaf page entry. Simply detect that the entry has a single child,
@@ -372,13 +380,15 @@ static inline bool section_covers_addr(const MemoryRegionSection *section,
 }
 
 static MemoryRegionSection *phys_page_find(PhysPageEntry lp, hwaddr addr,
-                                           Node *nodes, MemoryRegionSection *sections)
+                                           PhysPageMap *map)
 {
     PhysPageEntry *p;
+    Node *nodes = map->nodes;
+    MemoryRegionSection *sections = map->sections;
     hwaddr index = addr >> TARGET_PAGE_BITS;
     int i;
 
-    for (i = P_L2_LEVELS; lp.skip && (i -= lp.skip) >= 0;) {
+    for (i = map->levels; lp.skip && (i -= lp.skip) >= 0;) {
         if (lp.ptr == PHYS_MAP_NODE_NIL) {
             return &sections[PHYS_SECTION_UNASSIGNED];
         }
@@ -412,8 +422,7 @@ static MemoryRegionSection *address_space_lookup_region(AddressSpaceDispatch *d,
         section_covers_addr(section, addr)) {
         update = false;
     } else {
-        section = phys_page_find(d->phys_map, addr, d->map.nodes,
-                                 d->map.sections);
+        section = phys_page_find(d->phys_map, addr, &d->map);
         update = true;
     }
     if (resolve_subpage && section->mr->subpage) {
@@ -1246,8 +1255,7 @@ static void register_subpage(AddressSpaceDispatch *d, MemoryRegionSection *secti
     subpage_t *subpage;
     hwaddr base = section->offset_within_address_space
         & TARGET_PAGE_MASK;
-    MemoryRegionSection *existing = phys_page_find(d->phys_map, base,
-                                                   d->map.nodes, d->map.sections);
+    MemoryRegionSection *existing = phys_page_find(d->phys_map, base, &d->map);
     MemoryRegionSection subsection = {
         .offset_within_address_space = base,
         .size = int128_make64(TARGET_PAGE_SIZE),
@@ -2581,6 +2589,7 @@ static void mem_begin(MemoryListener *listener)
 
     d->phys_map  = (PhysPageEntry) { .ptr = PHYS_MAP_NODE_NIL, .skip = 1 };
     d->as = as;
+    d->map.levels = (d->as->space_bits - TARGET_PAGE_BITS - 1) / P_L2_BITS + 1;
     as->next_dispatch = d;
 }
 
@@ -2600,7 +2609,8 @@ static void mem_commit(MemoryListener *listener)
 
     atomic_rcu_set(&as->dispatch, next);
     if (cur) {
-        call_rcu(cur, address_space_dispatch_free, rcu);
+        synchronize_rcu();
+        address_space_dispatch_free(cur);
     }
 }
 
@@ -2646,7 +2656,8 @@ void address_space_destroy_dispatch(AddressSpace *as)
 
     atomic_rcu_set(&as->dispatch, NULL);
     if (d) {
-        call_rcu(d, address_space_dispatch_free, rcu);
+        synchronize_rcu();
+        address_space_dispatch_free(d);
     }
 }
 
@@ -2655,12 +2666,14 @@ static void memory_map_init(void)
     system_memory = g_malloc(sizeof(*system_memory));
 
     memory_region_init(system_memory, NULL, "system", UINT64_MAX);
-    address_space_init(&address_space_memory, system_memory, "memory");
+    address_space_init_with_bits(&address_space_memory, system_memory, "memory",
+            MEMORY_SPACE_BITS);
 
     system_io = g_malloc(sizeof(*system_io));
     memory_region_init_io(system_io, NULL, &unassigned_io_ops, NULL, "io",
                           65536);
-    address_space_init(&address_space_io, system_io, "I/O");
+    address_space_init_with_bits(&address_space_io, system_io, "I/O",
+            IO_SPACE_BITS);
 }
 
 MemoryRegion *get_system_memory(void)
@@ -2795,15 +2808,22 @@ static bool prepare_mmio_access(MemoryRegion *mr)
 static MemTxResult address_space_write_continue(AddressSpace *as, hwaddr addr,
                                                 MemTxAttrs attrs,
                                                 const uint8_t *buf,
-                                                int len, hwaddr addr1,
-                                                hwaddr l, MemoryRegion *mr)
+                                                int len)
 {
+    hwaddr addr1, l;
     uint8_t *ptr;
     uint64_t val;
+    MemoryRegion *mr;
     MemTxResult result = MEMTX_OK;
     bool release_lock = false;
 
     for (;;) {
+        l = len;
+        rcu_read_lock();
+        mr = address_space_translate(as, addr, &addr1, &l, true);
+        memory_region_ref(mr);
+        rcu_read_unlock();
+
         if (!memory_access_is_direct(mr, true)) {
             release_lock |= prepare_mmio_access(mr);
             l = memory_access_size(mr, l, addr1);
@@ -2844,6 +2864,7 @@ static MemTxResult address_space_write_continue(AddressSpace *as, hwaddr addr,
             invalidate_and_set_dirty(mr, addr1, l);
         }
 
+        memory_region_unref(mr);
         if (release_lock) {
             qemu_mutex_unlock_iothread();
             release_lock = false;
@@ -2857,8 +2878,6 @@ static MemTxResult address_space_write_continue(AddressSpace *as, hwaddr addr,
             break;
         }
 
-        l = len;
-        mr = address_space_translate(as, addr, &addr1, &l, true);
     }
 
     return result;
@@ -2867,18 +2886,10 @@ static MemTxResult address_space_write_continue(AddressSpace *as, hwaddr addr,
 MemTxResult address_space_write(AddressSpace *as, hwaddr addr, MemTxAttrs attrs,
                                 const uint8_t *buf, int len)
 {
-    hwaddr l;
-    hwaddr addr1;
-    MemoryRegion *mr;
     MemTxResult result = MEMTX_OK;
 
     if (len > 0) {
-        rcu_read_lock();
-        l = len;
-        mr = address_space_translate(as, addr, &addr1, &l, true);
-        result = address_space_write_continue(as, addr, attrs, buf, len,
-                                              addr1, l, mr);
-        rcu_read_unlock();
+        result = address_space_write_continue(as, addr, attrs, buf, len);
     }
 
     return result;

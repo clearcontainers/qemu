@@ -211,6 +211,7 @@ struct MemoryRegion {
     bool subpage;
     bool readonly; /* For RAM regions */
     bool rom_device;
+    bool nvdimm_device;
     bool flush_coalesced_mmio;
     bool global_locking;
     uint8_t dirty_log_mask;
@@ -280,6 +281,10 @@ struct MemoryListener {
     QTAILQ_ENTRY(MemoryListener) link_as;
 };
 
+#define ADDR_SPACE_BITS 64
+#define MEMORY_SPACE_BITS 36
+#define IO_SPACE_BITS 16
+
 /**
  * AddressSpace: describes a mapping of addresses to #MemoryRegion objects
  */
@@ -289,6 +294,7 @@ struct AddressSpace {
     char *name;
     MemoryRegion *root;
     int ref_count;
+    int space_bits;
     bool malloced;
 
     /* Accessed via RCU.  */
@@ -1392,6 +1398,10 @@ MemTxResult memory_region_dispatch_write(MemoryRegion *mr,
  *        output.
  */
 void address_space_init(AddressSpace *as, MemoryRegion *root, const char *name);
+
+
+void address_space_init_with_bits(AddressSpace *as, MemoryRegion *root,
+        const char *name, int space_bits);
 
 /**
  * address_space_init_shareable: return an address space for a memory region,
