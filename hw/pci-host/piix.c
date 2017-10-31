@@ -258,6 +258,10 @@ static void i440fx_pcihost_get_pci_hole64_start(Object *obj, Visitor *v,
 
     pci_bus_get_w64_range(h->bus, &w64);
     value = range_is_empty(&w64) ? 0 : range_lob(&w64);
+    /* reserve highest 4G for 64bit pci hole */
+    if (value < 0x100000000l) {
+        value = (1l << MEMORY_SPACE_BITS) - 0x100000000l;
+    }
     visit_type_uint64(v, name, &value, errp);
 }
 
@@ -271,6 +275,10 @@ static void i440fx_pcihost_get_pci_hole64_end(Object *obj, Visitor *v,
 
     pci_bus_get_w64_range(h->bus, &w64);
     value = range_is_empty(&w64) ? 0 : range_upb(&w64) + 1;
+    /* reserve highest 4G for 64bit pci hole */
+    if (value < 0x100000000l) {
+        value = 1l << MEMORY_SPACE_BITS;
+    }
     visit_type_uint64(v, name, &value, errp);
 }
 
@@ -369,6 +377,7 @@ PCIBus *i440fx_init(const char *host_type, const char *pci_type,
     PCII440FXState *f;
     unsigned i;
     I440FXState *i440fx;
+    PCMachineState *pcms = NULL;
 
     dev = qdev_create(NULL, host_type);
     s = PCI_HOST_BRIDGE(dev);
@@ -395,12 +404,15 @@ PCIBus *i440fx_init(const char *host_type, const char *pci_type,
 
     init_smram(f,d);
 
-    init_pam(dev, f->ram_memory, f->system_memory, f->pci_address_space,
-             &f->pam_regions[0], PAM_BIOS_BASE, PAM_BIOS_SIZE);
-    for (i = 0; i < 12; ++i) {
+    pcms = PC_MACHINE(qdev_get_machine());
+    if (pcms->fw) {
         init_pam(dev, f->ram_memory, f->system_memory, f->pci_address_space,
-                 &f->pam_regions[i+1], PAM_EXPAN_BASE + i * PAM_EXPAN_SIZE,
-                 PAM_EXPAN_SIZE);
+                 &f->pam_regions[0], PAM_BIOS_BASE, PAM_BIOS_SIZE);
+        for (i = 0; i < 12; ++i) {
+            init_pam(dev, f->ram_memory, f->system_memory, f->pci_address_space,
+                     &f->pam_regions[i+1], PAM_EXPAN_BASE + i * PAM_EXPAN_SIZE,
+                     PAM_EXPAN_SIZE);
+        }
     }
 
     /* Xen supports additional interrupt routes from the PCI devices to
